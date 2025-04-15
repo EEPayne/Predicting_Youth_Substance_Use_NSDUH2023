@@ -1,0 +1,310 @@
+---
+title: "Practical 1 EDA"
+author: "Elling Payne"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE);
+knitr::opts_chunk$set(fig.align = TRUE);
+```
+```{r}
+library(tidyverse);
+# library(tree);
+# library(randomForest);
+# library(gbm);
+# library(dplyr);
+set.seed(112358);
+```
+
+```{r}
+# get the data
+### As a reminder:
+### df; youth_experience_cols, substance_cols, demographic_cols
+load("in\\youth_data.Rdata");
+```
+
+
+### Overview of the dataset: What is it about? What information is present?
+The data is from the Nation Survey on Drug Use and Health (NSDUH) in 2023. It contains demographic and health information for individuals, information about drug use, and some other behavioral information. Some initial preprocessing has been done by Professor Mendible of Seattle University (2025).
+
+```{r}
+demographic_cols;
+```
+```{r}
+substance_cols;
+```
+```{r}
+youth_experience_cols;
+```
+
+
+
+### Resolving Value Codes
+While the data is clean, there are many values that are not very useful for exploration or input to a model. Within the demographic data, EDUSCHLGO, EDUSCHGRD2, and EDUSKPCOM stand out. These are all related to school attendance and year. For EDUSKPCOM, 94, 97, and 98 are similar in that they represent missing data, while 99 represents missing data but for an individual that has some valid reason for not having that data. Therefore it may make sense in a model to either exclude all so the variable can be used as numeric, or consolidated if the variable is to be transformed into a categorical one. All four codes could be consolidated or 99 could be kept separate. This may also be a good idea since individually these codes do not account for much of the data (besides 99). Whether youth are attending school, EDUSCHLGO, also has several codes that mean the answer is not available, with a bit of nuance. These might all be treated as missing data considering
+how little data they account for. However, code 11 is interesting because the youth has reported that they are enrolled but has missed 30 days of the last month. Should these be treated as enrolled or not enrolled? Given how sensitive decision trees can be, it might be best to leave 11 as a separate category and observe whether the model identifies it as more similar to 1 or 2. Finally, for the youths grade, EDUSCHGRD2, a 98 represents purely missing data while a 99 represents that the data is missing for some good reason, and so might be useful as a data category. However, this code is not comparable as an ordinal value in the same way as the other grade values may be. It might also make sense to consolidate grade into elementary, middle, high, college, and 99.
+
+```{r}
+# Some hardcoded transformations based on trying to maintain legitimate skip codes as a category
+transformDemographics <- function(data) {
+  rdata <- data.frame(data);
+  
+  # change code 11 to 1 to consolidate yes answers (we'll just worry about what 
+  # the answer was and also include EDUSKPCOM). Consolidate other codes to NaN
+  rdata[["EDUSCHLGO"]] <- as.factor(ifelse(rdata[["EDUSCHLGO"]] %in% c(85, 94, 97, 98), NA,
+                                    ifelse(rdata[["EDUSCHLGO"]] == 2, "Enrolled in School",
+                                           "Not Enrolled in School")));
+  
+  # convert EDUSKPCOM to categorical so we can use the 99 responses
+  rdata[["EDUSKPCOM"]] <- as.factor(ifelse(rdata[["EDUSKPCOM"]] == 0, "Skipped School",
+                                    ifelse(rdata[["EDUSKPCOM"]] <= 30, "Did Not Skip School",
+                                           ifelse(rdata[["EDUSKPCOM"]] %in% c(94, 97, 98), NA,
+                                                  "Question N/A"))));
+  
+  # properly label blank grade answers
+  rdata[["EDUSCHGRD2"]] <- as.factor(ifelse(rdata[["EDUSCHGRD2"]] %in% 1:11, rdata[["EDUSCHGRD2"]],
+                                     ifelse(rdata[["EDUSCHGRD2"]] == 99, 99, NA)));
+  
+  return(rdata);
+}
+```
+
+```{r}
+# demographics
+summary(df[, demographic_cols]);
+```
+```{r}
+summary(as.factor(df[["EDUSKPCOM"]][df[["EDUSKPCOM"]] > 30]));
+```
+```{r}
+# this might motivate a transformation  to binary missed or not + the 99 (3 cats)
+summary(df[["EDUSKPCOM"]][df[["EDUSKPCOM"]] <= 30]);
+```
+
+
+```{r}
+# 98 is missing data, 99 may indicate they are not enrolled in school
+unique(df[["EDUSCHGRD2"]]);
+```
+
+Notes in order of variables:  
+- roughly equal proportion of sex
+- Nonhisp (nh) White 1 -> Hispanic 7 -> nh Black 2 -> nh multi 6 -> nh Asian 5 -> nh NatAM NatAK 3 -> nh Native HI/Pac 4  
+- Health Very Good 2 -> Excellent 1 -> Good 3 -> Fair/Poor 4 -> NA  
+- Most of the youth are currently attending school or are on a break likely to end (1), but some aren't (2), or there is other uncertainty (other EDUSCHLGO codes)  
+- The respondents are mostly evenly split between grades 7-11 (code 3-7), then then a smaller number are in other grades or other status  (1: <= 5th, 2-8: 6th-12th, 9:1st yr college, 10:2nd/3rd yr college, 11:4th yr or higher college, 98:no answer, 99: legitimate skip/break)  
+- EDUSKPCOM Over half of the students missed no days from skipping, the rest is unintelligible since 97,98,99 not comparable  
+- ~8.5% do not have mother in the household  
+- ~28% do not have father in the household  
+- income: (1: <20,000), (2:20K-49,999), (3:50K-74,999), (4: >= 75K)  
+- govtprog (recieving assitance from Supp. Security Income, foodstamps, cash assistance, non-cash assistance) 1:yes, 2:no  
+- poverty: (1: < poverty thresh, computed per person), (2: <= 2X  thresh), (3: >2X thresh)  
+- pden10: (1: census segment in core-based statistical area with > 1mil people), (2: < 1mil), (3: not in CBSA)  
+- coutyp4: (1: county is large metro status), (2: small metro status), (3: nonmetro)  
+```{r}
+# This is meaningless for all variables due to the codes 91,93, 991, 993, 6, 5
+summary(df[, substance_cols]);
+```
+Notes:  
+- iralcfy (alc usage past year): (range 1-365), (991: never), (993: not past year)  
+- irmjfy (marijuana past year): same
+- ircigfm, irsmklss20n (cig/smokeless tobac last 30) : (range but 91=never, 93=not past 30)  
+- same for irmjfm, iralcfm
+- for \*age and \*try vars: (1-62), (91: never started)  
+- for \*ydays vars: (1: 1-11 days past yr), (2:12-49), (3:50-99), (4:100-299), (5:300-365), (6:0 past yr)  
+- for \*mdays vars: (1:1-2 days past month), (2:3-5), (3:6-19), (4:20-30), (5:0 past month (30 days))  
+  - except cigmdays: ()
+  
+```{r}
+reconcileFreqCodes <- function(colname, colvec) {
+  # Convert codes that represent no usage to 0 so they can be compared as numeric or ordinal
+  yrfreq_or_agetry_names <- c("IRALCFY", "IRMJFY", "IRCIGAGE", "IRSMKLSSTRY",
+                              "IRALCAGE", "IRMJAGE");
+  mnthfreq_names <- c("IRCIGFM", "IRSMKLSS30N", "IRALCFM", "IRMJFM");
+  ndays_6cats_names <- c("ALCYDAYS", "MRJYDAYS", "CIGMDAYS");
+  ndays_5cats_names <- c("ALCMDAYS", "MRJMDAYS", "SMKLSMDAYS");
+  if (colname %in% yrfreq_or_agetry_names) {
+    return(ifelse((colvec == 991) | (colvec == 993), 0, colvec));
+  }
+  else if (colname %in% mnthfreq_names) {
+    return(ifelse((colvec == 91) | (colvec == 93), 0, colvec));
+  }
+  else if (colname %in% ndays_5cats_names) {
+    return(ifelse(colvec == 5, 0, colvec));
+  }
+  else if (colname %in% ndays_6cats_names) {
+    return(ifelse(colvec == 6, 0, colvec));
+  }
+  return(colvec);
+};
+```
+
+```{r}
+clean_df <- data.frame(df);
+
+for (column in names(clean_df)) clean_df[[column]] <- reconcileFreqCodes(column, clean_df[[column]]);
+summary(clean_df[, substance_cols]);
+
+clean_df <- transformDemographics(clean_df);
+summary(clean_df[, demographic_cols]);
+
+
+```
+
+
+```{r}
+summary(df[, youth_experience_cols]);
+```
+Notes from codebook:  
+- all are binary responses (1 or 2) with some potentially missing 
+
+- SCHFELT: how youth felt about attending school past yr, (1:liked), (2:didn't like)
+
+- TCHGJOB: teacher told youth they did a good job past year, (1: yes), (2: no)  
+
+- AVGGRADE: (1: D or lower), (2: C or higher)  
+
+- STNDSCIG: (1: most students in child's grade/class smokes cigs), (2: not most)  
+- STNDSMJ, STNDALC: same for marijauna, alcohol  
+- STNDDDNK: standard to get drunk once a week in youths class/grade (1: yes, 2: no)  
+
+- PARCHKHW: did parents check homework completion last yr (1: yes/usually), (2:no/not often)  
+- PARHLPHW: same but did parents help with homework  
+- PRCHORE2: parents made youth do chores past year (1: often), (2:no/not often)  
+- PRLMTTV2: parents limited tv time lasst year (1: yes), (2:no/not often)  
+- PARLMTSN: parents limit time out on school night  
+- PRGDJOB2: parents told youth they did a good job past year  
+- PRPROUD2: parents told youth they were proud of their deeds past year  
+- ARGUPAR: argued with parents past year (1: <= 9 times), (1: >= 10 times)  
+
+- YOUGRPFT2: youth fought group vs group past year (1: yes), (2: no)  
+- YOHGUN2: youth carried handgun past yr (1: yes), (2: no)  
+- YOSELL2: youth sold illegal drugs past yr (1: yes), (2: no)  
+- YOSTOLE2: yth stole past yr (1: yes, 2:no)  
+- YOATTAK2: yth attacked with intent to harm past yr (1: yes, 2: no)  
+
+- PRPKCIG2: how yth thinks their parents feel about yth smoking cigs pack/day (1: strong disapprove, 2: somewhat disapprove or neither)  
+- PRMJEVR2: how yth thinks their parents feel about trying marijuana  
+- PRMJMO: how yth thinks their parents feel about monthly marijuana use  
+- PRALDLY2: how yth thinks parents feel about alc 1-2 drinks per day ((1: strong or somewhat disapprove, 2: neither disapprove nor approve)  
+
+- YFLPKCG2: how yth feels about peers smokeing cigs pack per day  
+- YFLTMRJ2: how yth feels about peers trying marijuana  
+- YFLMJMO: how yth feels about peers using marijuana monthly  
+- YFLADLY2: how yth feels about peers having 1-2 alc drinks per day  
+
+- FRDPCIG2: how yth thinks friends feel about smoking cigs pack a day  
+- FRDMEVR2: how yth thinks friends feel about trying marijuana  
+- FRDMJMON: how yth thinks friends feel about using marijuana once a month  
+- FRDADLY2: how yth thinks friends feels about having 1-2 alc drinks a day  
+
+- TALKPROB: does a yth talk with someone (parent, friend, other) about their problems (1: no one, 2: someone)  
+- PRTALK3: has a yth talked with parent about dangers of alc, tob, mj? (1: yes, 2: no)  
+- PRBSOLV2: participated in problem solving, communications skills, or self esteem workshop (1: yes, 2: no)    
+- PREVIOL2: participated in violence prevention program  
+- PRVDRGO2: participated in extra-curr substance abuse prevention program  
+- GRPCNSL2: participated in program to help substance abuse  
+- PREGPGM2: participated in pregnancy/STD prevention program  
+- YTHACT2: in how many activities does the youth participate? (1: 0 or 1, 2: 2 or more)  
+- DRPRVME3: yth has seen an alcohol or drug prevention message outside of school (1: yes, 2: no)  
+- ANYEDUC3: has yth had any drug/alc prevention education in school? (1: yes, 2: no)  
+
+- RLGATTD: How many times yth has attended religious service past year (1: 25 or more, 2: less than 25)  
+- RLGIMPT: Are religious beliefs very important to yth's life? (1: agree, 2: disagree)  
+- RLGDCSN: Religious beliefs influence yth's life decisions (1: agree, 2: disagree)  
+- RLGFRND: It's important for friends to share religious beliefs (1:agree, 2: disagree)  
+* other variables exist in the full set
+
+### Missing Data
+Missing data will be removed and Chi-squared or Kolmogorov-Smirnov tests to compare distributions before and after of each feature.
+
+```{r}
+cleaner_df <- clean_df %>% na.omit();
+table(sapply(cleaner_df, function(x) {return(paste(class(x), collapse=" "));}));
+```
+
+```{r}
+# check sameness of distributions of features
+
+# chi-squared tests for factors and ordered factors (and discrete numeric)
+chisq.results <- list();
+for (column in names(cleaner_df)) {
+  if (!(is.factor(cleaner_df[[column]]) | is.ordered(cleaner_df[[column]]))) next;
+  x <- as.factor(cleaner_df[[column]]);
+  y <- as.factor(clean_df[[column]]);
+  both_levels <- union(levels(x), levels(y));
+  x <- factor(x, levels = both_levels);
+  y <- factor(y, levels = both_levels);
+  test.result <- chisq.test(table(x), table(y));
+  chisq.results[[column]] <- c(test.result$p.value);
+} 
+csv_path <- "out\\preprocessing\\data\\chisq_goodness_fit_full_vs_clean.csv";
+chisq.results <- data.frame(chisq.results) %>%
+  pivot_longer(cols=everything(), names_to="variable",
+               values_to="p_value") %>%
+  mutate(test_type = "chi_squared");
+
+
+# kolmogorov-smirnov for discrete numeric
+kolsmir.results <- list();
+for (column in names(cleaner_df)) {
+  if (!is.numeric(cleaner_df[[column]])) next;
+  test.result <- ks.test(cleaner_df[[column]], clean_df[[column]]);
+  kolsmir.results[[column]] <- c(test.result$p.value);
+}
+csv_path <- "out\\preprocessing\\data\\kolsmir_goodness_fit_full_vs_clean.csv";
+kolsmir.results <- data.frame(kolsmir.results) %>%
+  pivot_longer(cols=everything(), names_to="variable",
+               values_to="p_value") %>%
+  mutate(test_type = "kolmogorov_smirnov");
+
+csv_path <- "out\\preprocessing\\data\\goodness_of_fit_full_vs_clean.csv";
+full_test.results <- rbind(chisq.results, kolsmir.results);
+write.csv(full_test.results, csv_path, row.names=FALSE);
+```
+```{r}
+# now some more careful chi-squared tests for the discrete numeric
+```
+
+Based on the chi-squared and Kolmogorov-Smirnov tests, IRALCFY, IRALCAGE, and IRALCYDAYS may change in distribution after removing the missing values, but the others do not appear to based on an acceptable false discovery rate of 5%.
+
+```{r}
+for (column in names(cleaner_df)) {
+  if (!is.factor(cleaner_df[[column]]) & !is.ordered(cleaner_df[[column]])) next;
+  bar_data <- data.frame(
+    class = c(names(table(clean_df[[column]])), names(table(cleaner_df[[column]]))),
+    freq = c(as.numeric(table(clean_df[[column]])), as.numeric(table(cleaner_df[[column]]))),
+    dataset = c(rep("Original", length(table(clean_df[[column]]))),
+                rep("NA Removed", length(table(cleaner_df[[column]]))))
+    );
+  png(paste0("out\\preprocessing\\plots\\", column, "_freq_full_vs_clean.png"));
+  plt <- ggplot(data=bar_data, mapping=aes(x=class, y=freq, fill = dataset)) +
+          geom_bar(stat="identity", position="dodge") +
+          ggtitle(paste0("Comparison of ", column, " distribution after removing NA values")) +
+          scale_fill_manual(values=c("skyblue", "coral"));
+  print(plt);
+  dev.off();
+}
+```
+```{r}
+for (column in names(cleaner_df)) {
+  if (!is.numeric(cleaner_df[[column]])) next;
+    dens_data <- data.frame(
+    value = c(clean_df[[column]], cleaner_df[[column]]),
+    dataset = c(rep("Original", length(clean_df[[column]])),
+                rep("NA Removed", length(cleaner_df[[column]])))
+    );
+  png(paste0("out\\preprocessing\\plots\\", column, "_dens_full_vs_clean.png"));
+  plt <- ggplot(data = dens_data) +
+    geom_histogram(position="dodge", bins=30, mapping=aes(x=value, fill=dataset)) +
+    ggtitle(paste0("Density of ", column, ": full vs cleaned dataset")) +
+    scale_fill_manual(values=c("skyblue", "coral"));
+  print(plt);
+  dev.off();
+}
+```
+
+
+
+### Distribution of the Data
+Histograms and Correlation

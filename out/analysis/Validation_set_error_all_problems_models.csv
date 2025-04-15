@@ -1,0 +1,8 @@
+"problem","model_type","test_error","error_type"
+1,"tree",0.111940298507463,"error_rate"
+1,"bagging",0.109452736318408,"error_rate"
+1,"random_forest",0.110074626865672,"error_rate"
+2,"tree",0.0814676616915423,"error_rate"
+2,"random_forest",0.0677860696517413,"error_rate"
+3,"tree",2101.54018427281,"mse"
+3,"boosting",1991.95464842806,"mse"
