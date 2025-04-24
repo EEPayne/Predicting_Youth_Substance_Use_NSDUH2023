@@ -8,6 +8,9 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE);
 knitr::opts_chunk$set(fig.align = TRUE);
 ```
+
+### Loading necessary data and packages
+
 ```{r}
 library(tidyverse);
 # library(tree);
@@ -88,7 +91,7 @@ unique(df[["EDUSCHGRD2"]]);
 ```
 
 Notes in order of variables:  
-- roughly equal proportion of sex
+- roughly equal proportion of sex  
 - Nonhisp (nh) White 1 -> Hispanic 7 -> nh Black 2 -> nh multi 6 -> nh Asian 5 -> nh NatAM NatAK 3 -> nh Native HI/Pac 4  
 - Health Very Good 2 -> Excellent 1 -> Good 3 -> Fair/Poor 4 -> NA  
 - Most of the youth are currently attending school or are on a break likely to end (1), but some aren't (2), or there is other uncertainty (other EDUSCHLGO codes)  
@@ -100,7 +103,13 @@ Notes in order of variables:
 - govtprog (recieving assitance from Supp. Security Income, foodstamps, cash assistance, non-cash assistance) 1:yes, 2:no  
 - poverty: (1: < poverty thresh, computed per person), (2: <= 2X  thresh), (3: >2X thresh)  
 - pden10: (1: census segment in core-based statistical area with > 1mil people), (2: < 1mil), (3: not in CBSA)  
-- coutyp4: (1: county is large metro status), (2: small metro status), (3: nonmetro)  
+- coutyp4: (1: county is large metro status), (2: small metro status), (3: nonmetro) 
+
+
+### Cleaning Substance Columns
+
+In general, there are a number of codes which ultimately mean that there was zero substance usage on the time frame of the given variable. For the days of usage in the past year, 991 and 993 will be converted to 0. For days of usage in the last month, 91 and 93 will become 0. For variables representing age of first use, 91 does mean that no usage has occurred, but since the variable represents age of first use, not amount of use, 91 cannot be reasonable converted. If these features are used for prediction or as the response, it may be necessary to convert the variable into an unordered factor, so that information about those who have never tried the drug might still be captured. However, it is also possible that a decision tree would detect this issue automatically. For instance, the tree might find that age of first use is only useful when there has been some use, in which case any further splitting on that subset of the population would not be affected by the nonsense number.  
+
 ```{r}
 # This is meaningless for all variables due to the codes 91,93, 991, 993, 6, 5
 summary(df[, substance_cols]);
@@ -118,12 +127,11 @@ Notes:
 ```{r}
 reconcileFreqCodes <- function(colname, colvec) {
   # Convert codes that represent no usage to 0 so they can be compared as numeric or ordinal
-  yrfreq_or_agetry_names <- c("IRALCFY", "IRMJFY", "IRCIGAGE", "IRSMKLSSTRY",
-                              "IRALCAGE", "IRMJAGE");
+  yrfreq_names <- c("IRALCFY", "IRMJFY", "IRCIGAGE");
   mnthfreq_names <- c("IRCIGFM", "IRSMKLSS30N", "IRALCFM", "IRMJFM");
   ndays_6cats_names <- c("ALCYDAYS", "MRJYDAYS", "CIGMDAYS");
   ndays_5cats_names <- c("ALCMDAYS", "MRJMDAYS", "SMKLSMDAYS");
-  if (colname %in% yrfreq_or_agetry_names) {
+  if (colname %in% yrfreq_names) {
     return(ifelse((colvec == 991) | (colvec == 993), 0, colvec));
   }
   else if (colname %in% mnthfreq_names) {
@@ -151,6 +159,9 @@ summary(clean_df[, demographic_cols]);
 
 ```
 
+### Youth Experience Data
+
+The youth experience data is generally binary class data, and is already pretty clean. There are no further steps necessay to prepare the data for tree-based models. However, many of the features to exhibit a great deal of class imbalance, which may limit the models ability to learn about underrepresented populations. In general, since substance usage and criminality is uncommon among youth, classes that represent positive attidudes toward drugs or delinquent behavior are underepresented.
 
 ```{r}
 summary(df[, youth_experience_cols]);
@@ -216,7 +227,7 @@ Notes from codebook:
 * other variables exist in the full set
 
 ### Missing Data
-Missing data will be removed and Chi-squared or Kolmogorov-Smirnov tests to compare distributions before and after of each feature.
+Missing data will be removed and Chi-squared or Kolmogorov-Smirnov tests to compare distributions before and after of each feature. While the tests do indicate that there might be some changes in ALCYDAYS, IRALCFY, and IRALCAGE. This might be a concern for creating a model to try and predict ALCYDAYS based on the cleaned data. However, frequency plots before and after cleaning show a fairly similar shape for ALCYDAYS, so it may still be reasonable to proceed with modeling. Furthermore, the Kolmogorov-Smirnov test used may not bevery accurate for ALCYDAYS since it generally assumes an interval variable. While ALCYDAYS is ordinal after converting the no use code to 0, the intervals between values are not even. This potentially supports trusting the frequency plots, at least for now.
 
 ```{r}
 cleaner_df <- clean_df %>% na.omit();
@@ -262,9 +273,6 @@ csv_path <- "out\\preprocessing\\data\\goodness_of_fit_full_vs_clean.csv";
 full_test.results <- rbind(chisq.results, kolsmir.results);
 write.csv(full_test.results, csv_path, row.names=FALSE);
 ```
-```{r}
-# now some more careful chi-squared tests for the discrete numeric
-```
 
 Based on the chi-squared and Kolmogorov-Smirnov tests, IRALCFY, IRALCAGE, and IRALCYDAYS may change in distribution after removing the missing values, but the others do not appear to based on an acceptable false discovery rate of 5%.
 
@@ -304,7 +312,218 @@ for (column in names(cleaner_df)) {
 }
 ```
 
+### Histograms and Frequency Charts: Non-normality and class imbalance
+
+For variables representing age of first use, the histogram of only those who have ever used is included with an annotation describing the number of youth who have never tried the substance.  
+```{r}
+# check normality, min, max, mean, var, skew of numeric variables. Create Histograms
+numeric_vars <- sapply(cleaner_df, is.numeric);
+numeric_cols <- names(cleaner_df)[numeric_vars];
+agetry_names <- c("IRSMKLSSTRY", "IRALCAGE", "IRMJAGE");
+for (var in numeric_cols) {
+  # Histogram
+  num_never <- 0;
+  if (var %in% agetry_names) {
+    # only plot histogram for those who have tried, most have not at all
+    to_plot <- cleaner_df[[var]][cleaner_df[[var]] < 90];
+    num_never <- length(cleaner_df[[var]]) - length(to_plot);
+  }
+  else {
+    to_plot <- cleaner_df[[var]];
+  }
+  nbins = min(c(30, length(unique(to_plot))));
+  #dev.off()  # Save the file
+  png(paste0("out/preprocessing/plots/", var, "_histogram.png"));
+  plt <- ggplot(mapping=aes(x=to_plot)) +
+    geom_histogram(bins=nbins, fill="skyblue") +
+    stat_bin(bins=nbins, geom="text", mapping=aes(label=..count..), vjust=-0.5) +
+    ggtitle(paste0("Histogram of ", var)) +
+    xlab(var) + ylab("Frequency");
+    
+  if (num_never > 0) {
+    bin_stats <- ggplot(mapping=aes(x=to_plot)) + stat_bin(bins=nbins);
+    bin_stats <- ggplot_build(bin_stats)$data[[1]];
+    max_bin_cnt <- max(bin_stats$count)
+    plt <- plt + annotate(geom="text", x=1, y=2*max_bin_cnt,
+                          label=paste0(num_never, " never tried."),
+                          hjust=0, vjust=1, color="red", size=5);
+  }
+  print(plt);
+  dev.off();
+}
+```
+None of the numeric variables appear to be of a normal distribution at first glance. Generally, they are all nonnegative variables heavily skewed right. As a result, in order to fit tree models to predict IRMJFY, transformations of IRMJFY should be considered. A log transformation and a square root transformation are considered, with the log transformation resulting in a greater reduction in skew, but not in normality.    
+
+```{r}
+library(moments);
+# check if log transformation of IRMJFY results in more normality, less skew
+irmjfy_skew <- skewness(cleaner_df[["IRMJFY"]]);
+log_irmjfy <- log(cleaner_df[["IRMJFY"]] + 0.001); # nudge values so 0 can be included
+log_skew <- skewness(log_irmjfy);
+print(paste0("Skew before log transformation: ", irmjfy_skew));
+print(paste0("Skew after log transformation: ", log_skew));
+plt <- ggplot(mapping=aes(x=log_irmjfy)) +
+    geom_histogram(bins=30, fill="skyblue") +
+    stat_bin(bins=30, geom="text", mapping=aes(label=..count..), vjust=-0.5) +
+    ggtitle("Histogram of Log Transformed IRMJFY") +
+    xlab("Log Transformed IRMJFY") + ylab("Frequency");
+print(plt);
+```
+```{r}
+# check if square root transformation improves things
+sqrt_irmjfy <- sqrt(cleaner_df[["IRMJFY"]]);
+sqrt_skew <- skewness(sqrt_irmjfy);
+print(paste0("Skew before square root transformation: ", irmjfy_skew));
+print(paste0("Skew after square root transformation: ", sqrt_skew));
+plt <- ggplot(mapping=aes(x=sqrt_irmjfy)) +
+    geom_histogram(bins=30, fill="skyblue") +
+    stat_bin(bins=30, geom="text", mapping=aes(label=..count..), vjust=-0.5) +
+    ggtitle("Histogram of Square Root Transformed IRMJFY") +
+    xlab("Square Root Transformed IRMJFY") + ylab("Frequency");
+print(plt);
+```
 
 
-### Distribution of the Data
-Histograms and Correlation
+
+```{r}
+# Check class imbalance for factors, mode, and create frequency chart
+categorical_vars <- sapply(cleaner_df, is.factor);
+categorical_cols <- names(cleaner_df)[categorical_vars];
+
+for (var in categorical_cols) {
+  # Create bar plot and save as a file
+  png(paste0("out/preprocessing/plots/", var, "_frequency_chart.png"))
+
+  plt <- ggplot(mapping = aes(x = cleaner_df[[var]])) +
+    geom_bar(fill = "skyblue", color = "darkgrey") +
+    geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, color = "black") +
+    labs(title = paste0("Frequency Chart for ", var), x = var, y = "Frequency");
+  print(plt);
+  dev.off()  # Save the file
+}
+```
+
+### Testing  for potential relationships between features and responses
+For comparisons of variables in which one is numeric and the other is a binary factor, a two sample t-test is performed to test whether the means of the numeric variable differ between classes. For Comparison of numeric to a factor with more than two levels, an F-test is performed to test whether any of the class means differ from any other. For comparing factors to other factors, a chis-quared test for goodness of fit is used. Finally, for comparing numeric features to numeric features, no test is performed but the Spearman correlation coefficient is computed for comparison. Spearman was chosen because it may better capture at least some nonlinearity in the relationships, which is expected.
+
+```{r}
+# tests for relationship between potential features and TOBFLAG
+feature_names <- names(cleaner_df[,names(cleaner_df) != "TOBFLAG"]);
+test_types = character(length(names(cleaner_df))-1);
+test_scores = numeric(length(names(cleaner_df))-1);
+p_vals = numeric(length(names(cleaner_df))-1);
+ind <- 1;
+for (feature in feature_names) {
+  if (is.factor(cleaner_df[[feature]])) {
+    # perform chisquared for target classes vs feature class frequencies
+    # Create a contingency table
+    cont.table <- table(cleaner_df[["TOBFLAG"]], cleaner_df[[feature]])
+    test_types[ind] <- "chi-squared";
+    test_result <- chisq.test(cont.table)
+    test_scores[ind] <- test_result$statistic
+    p_vals[ind] <- test_result$p.value
+  }
+  else if (is.numeric(cleaner_df[[feature]])) {
+    # two sample t-test for means of feature vs target class
+    test_types[ind] <- "t-test";
+    test_result <- t.test(cleaner_df[[feature]] ~ cleaner_df[["TOBFLAG"]]);
+    test_scores[ind] <- test_result$statistic;
+    p_vals[ind] <- test_result$p.value;
+  }
+  else {
+    test_types[ind] <- "";
+    test_scores[ind] <- NaN;
+    p_vals[ind] <- NaN;
+    print("Error testing relationship: Feature must be numeric or a factor.");
+  }
+  ind <- ind + 1;
+}
+test_df <- data.frame(feature = feature_names, test = test_types,
+                      statistic = test_scores, p.value = p_vals);
+write.csv(test_df, "out/preprocessing/data/TOBFLAG_vs_features_correlation_metrics.csv",
+          row.names = FALSE);
+head(test_df);
+```
+
+```{r}
+# tests for relationship between potential features and ALCYDAYS
+feature_names <- names(cleaner_df[,names(cleaner_df) != "ALCYDAYS"]);
+test_types = character(length(names(cleaner_df))-1);
+test_scores = numeric(length(names(cleaner_df))-1);
+p_vals = numeric(length(names(cleaner_df))-1);
+ind <- 1;
+for (feature in feature_names) {
+  if (is.factor(cleaner_df[[feature]])) {
+    # perform chisquared for target classes vs feature class frequencies
+    # Create a contingency table
+    cont.table <- table(cleaner_df[["ALCYDAYS"]], cleaner_df[[feature]])
+    test_types[ind] <- "chi-squared";
+    test_result <- chisq.test(cont.table)
+    test_scores[ind] <- test_result$statistic
+    p_vals[ind] <- test_result$p.value
+  }
+  else if (is.numeric(cleaner_df[[feature]])) {
+    # anova F-test (at least one mean differs)
+    test_types[ind] <- "F-test";
+    test_result <- aov(cleaner_df[[feature]] ~ cleaner_df[["ALCYDAYS"]]);
+    test_scores[ind] <- summary(test_result)[[1]][1,4]; # get f-score
+    p_vals[ind] <- summary(test_result)[[1]][1,5]; # get p-value
+  }
+  else {
+    test_types[ind] <- "";
+    test_scores[ind] <- NaN;
+    p_vals[ind] <- NaN;
+    print("Error testing relationship: Feature must be numeric or a factor.");
+  }
+  ind <- ind + 1;
+}
+test_df <- data.frame(feature = feature_names, test = test_types,
+                      statistic = test_scores, p.value = p_vals);
+write.csv(test_df, "out/preprocessing/data/ALCYDAYS_vs_features_correlation_metrics.csv",
+          row.names = FALSE);
+head(test_df);
+```
+
+
+```{r}
+# tests for relationship between potential features and IRMJFY
+feature_names <- names(cleaner_df[,names(cleaner_df) != "IRMJFY"]);
+test_types = character(length(names(cleaner_df))-1);
+test_scores = numeric(length(names(cleaner_df))-1);
+p_vals = numeric(length(names(cleaner_df))-1);
+ind <- 1;
+for (feature in feature_names) {
+  if (is.factor(cleaner_df[[feature]]) & nlevels(cleaner_df[[feature]]) == 2) {
+    # two sample t-test for means of target vs feature classes
+    test_types[ind] <- "t-test";
+    test_result <- t.test(cleaner_df[["IRMJFY"]] ~ cleaner_df[[feature]]);
+    test_scores[ind] <- test_result$statistic;
+    p_vals[ind] <- test_result$p.value;
+  }
+  else if (is.factor(cleaner_df[[feature]])) {
+    # anova F-test for means of target vs feature classes
+    test_types[ind] <- "F-test";
+    test_result <- aov(cleaner_df[["IRMJFY"]] ~ cleaner_df[[feature]]);
+    test_scores[ind] <- summary(test_result)[[1]][1,4]; # get f-score
+    p_vals[ind] <- summary(test_result)[[1]][1,5]; # get p-value
+  }
+  else if (is.numeric(cleaner_df[[feature]])) {
+    # do spearman correlations instead of test (spearman since nonlinearity is suspected)
+    test_types[ind] <- "Spearman-correlation";
+    test_scores[ind] <- cor(cleaner_df[["IRMJFY"]], cleaner_df[[feature]], method="spearman");
+    p_vals[ind] <- NaN
+  }
+  else {
+    test_types[ind] <- "";
+    test_scores[ind] <- NaN;
+    p_vals[ind] <- NaN;
+    print("Error testing relationship: Feature must be numeric or a factor.");
+  }
+  ind <- ind + 1;
+}
+test_df <- data.frame(feature = feature_names, test = test_types,
+                      statistic = test_scores, p.value = p_vals);
+write.csv(test_df, "out/preprocessing/data/IRMJFY_vs_features_correlation_metrics.csv",
+          row.names = FALSE);
+head(test_df);
+```

@@ -36,12 +36,11 @@ transformDemographics <- function(data) {
 
 reconcileFreqCodes <- function(colname, colvec) {
   # Convert codes that represent no usage to 0 so they can be compared as numeric or ordinal
-  yrfreq_or_agetry_names <- c("IRALCFY", "IRMJFY", "IRCIGAGE", "IRSMKLSSTRY",
-                              "IRALCAGE", "IRMJAGE");
+  yrfreq_names <- c("IRALCFY", "IRMJFY", "IRCIGAGE");
   mnthfreq_names <- c("IRCIGFM", "IRSMKLSS30N", "IRALCFM", "IRMJFM");
   ndays_6cats_names <- c("ALCYDAYS", "MRJYDAYS", "CIGMDAYS");
   ndays_5cats_names <- c("ALCMDAYS", "MRJMDAYS", "SMKLSMDAYS");
-  if (colname %in% yrfreq_or_agetry_names) {
+  if (colname %in% yrfreqnames) {
     return(ifelse((colvec == 991) | (colvec == 993), 0, colvec));
   }
   else if (colname %in% mnthfreq_names) {

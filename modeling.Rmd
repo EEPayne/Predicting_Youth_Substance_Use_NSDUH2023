@@ -1,0 +1,675 @@
+---
+title: "Modeling Exploration Practical 1"
+author: "Elling Payne"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE);
+knitr::opts_chunk$set(fig.align = "center");
+```
+
+```{r}
+library(tidyverse);
+#library(caret);
+set.seed(112358);
+load("out/preprocessing/data/youth_nsduh_2023_transformed.Rdata");
+
+test.indices <- sample(1:nrow(youth_nsduh_2023_transformed),
+                       size=0.2*nrow(youth_nsduh_2023_transformed));
+test.data <- youth_nsduh_2023_transformed[test.indices,];
+train.data <- youth_nsduh_2023_transformed[-test.indices,];
+
+test_errs <- list();
+```
+
+```{r}
+# function to compute overall evaluation criterion for classification trees
+balanced_f1 <- function(confusion_matrix, weights) {
+  #compute f1 for each class and return a weighted average
+  f1_scores <- numeric(nrow(confusion_matrix));
+  
+  for (i in 1:nrow(confusion_matrix)) {
+    TP <- confusion_matrix[i, i];
+    FP <- sum(confusion_matrix[, i]) - TP;
+    FN <- sum(confusion_matrix[i, ]) - TP;
+    precision <- TP / (TP + FP);
+    recall <- TP / (TP + FN);
+    f1_scores[i] <- (2 * precision * recall) / (precision + recall);
+     #let 0 indicate one of the classes had zero precision and recall.
+    if (is.na(f1_scores[i])) f1_scores[i] <- 0;
+  }
+  
+  return(c(mean(f1_scores * weights), f1_scores));
+}
+```
+
+
+
+## Problem 1: Predicting whether a youth has used either cigarettes or smokeless nicotine products
+
+An initial exploration seems to reveal that the models are not very interesting when other substance use variables are included, since these tend to over shadow others. A random forest model may be able to handle this better than a simple tree or bagged model, but for now the other substance data is omitted to focus on other factors.
+
+### Problem 1: Final Preprocessing: subset traing and testing data.
+
+```{r}
+# remove other substance columns
+prob1_data.train <- train.data %>%
+  select(all_of(c(demographic_cols, youth_experience_cols, "TOBFLAG")));
+prob1_data.test <- test.data %>%
+  select(all_of(c(demographic_cols, youth_experience_cols, "TOBFLAG")));
+write.csv(prob1_data.train, "out/analysis/problem1/data/train_data_problem1.csv",
+          row.names=FALSE);
+write.csv(prob1_data.test, "out/analysis/problem1/data/test_data_problem1.csv",
+          row.names=FALSE);
+```
+
+
+### Problem 1: Tree and Pruned Tree Model
+
+```{r}
+# simple trees
+library(tree);
+
+
+fit.tree <- tree(TOBFLAG ~ ., data = prob1_data.train);
+cv.result <- cv.tree(fit.tree, FUN=prune.misclass);
+print(which.min(cv.result$dev));
+pruned.tree <- prune.tree(fit.tree, best=3);
+print(summary(pruned.tree));
+png("out/analysis/problem1/plots/cverror_vs_pruning_prob1.png");
+plot(cv.result$size, cv.result$dev, main="cv error vs tree size");
+dev.off();
+png("out/analysis/problem1/plots/tree_pruned_prob1.png");
+plot(pruned.tree);
+text(pruned.tree, pretty=0);
+dev.off();
+png("out/analysis/problem1/plots/tree_full_prob1.png");
+plot(fit.tree);
+text(fit.tree, pretty=0);
+dev.off();
+print(cv.result);
+
+pred <- predict(fit.tree, newdata=prob1_data.test, type="class");
+conf.mat <- table(pred, prob1_data.test$TOBFLAG);
+testerr <- (conf.mat[1,2] + conf.mat[2,1]) / sum(conf.mat);
+# compute balanced error rate equally weighting error for each class
+overall_err <- balanced_f1(conf.mat, rep(1/nrow(conf.mat), nrow(conf.mat)));
+test_errs <- rbind(test_errs, data.frame(problem=1, model_type="tree",
+                                         test_error=testerr, error_type="error_rate",
+                                         balanced_f1=overall_err[1], 
+                                         class1_f1=overall_err[2],
+                                         class2_f1=overall_err[3],
+                                         class3_f1=NaN,
+                                         log_transformed=FALSE));
+pred <- predict(pruned.tree, newdata=prob1_data.test, type="class");
+conf.mat <- table(pred, prob1_data.test$TOBFLAG);
+testerr <- (conf.mat[1,2] + conf.mat[2,1]) / sum(conf.mat);
+# compute balanced error rate equally weighting error for each class
+overall_err <- balanced_f1(conf.mat, rep(1/nrow(conf.mat), nrow(conf.mat)));
+test_errs <- rbind(test_errs, data.frame(problem=1, model_type="pruned_tree",
+                                         test_error=testerr, error_type="error_rate",
+                                         balanced_f1=overall_err[1], 
+                                         class1_f1=overall_err[2],
+                                         class2_f1=overall_err[3],
+                                         class3_f1=NaN,
+                                         log_transformed=FALSE));
+```
+
+### Problem 1: Bagged ensemble model
+
+```{r}
+# bagged model
+library(randomForest);
+fit.bag <- randomForest(TOBFLAG ~ ., data=prob1_data.train, mtry=ncol(prob1_data.train)-1,
+                       importance=TRUE);
+png("out/analysis/problem1/plots/error_vs_size_bagging_problem1.png");
+plot(fit.bag, main="OOB Error (Total and by Group)");
+
+legend("topright", legend = c("Total", "No Tobacco", "Tobacco"), col = 1:ncol(fit.bag$err.rate),
+       lty = 1:ncol(fit.bag$err.rate), cex = 0.8);
+dev.off();
+
+pred <- predict(fit.bag, newdata=prob1_data.test, type="class");
+conf.mat <- table(pred, prob1_data.test$TOBFLAG);
+testerr <- (conf.mat[1,2] + conf.mat[2,1]) / sum(conf.mat);
+# compute balanced error rate equally weighting error for each class
+overall_err <- balanced_f1(conf.mat, rep(1/nrow(conf.mat), nrow(conf.mat)));
+test_errs <- rbind(test_errs, data.frame(problem=1, model_type="bagging",
+                                         test_error=testerr, error_type="error_rate",
+                                         balanced_f1=overall_err[1], 
+                                         class1_f1=overall_err[2],
+                                         class2_f1=overall_err[3],
+                                         class3_f1=NaN,log_transformed=FALSE));
+```
+```{r}
+varImpPlot(fit.bag);
+imp_bag <- importance(fit.bag)[order(importance(fit.bag)[, 4], decreasing=TRUE),];
+write.csv(imp_bag, "out/analysis/problem1/data/rel_import_bagging_problem1.csv",
+          row.names=TRUE);
+
+```
+
+
+### Problem 1: Random Forest Model
+
+```{r}
+# tuning based on OOB overall error
+tune.result <- tuneRF(x=prob1_data.train %>% select(-TOBFLAG),
+                      y=prob1_data.train$TOBFLAG,
+                      mtryStart=floor(sqrt(ncol(prob1_data.train)-1)),
+                      stepFactor=1.2,
+                      improve=0.001,
+                      ntreeTry=100,);
+
+mtry_vals <- tune.result[, 1];
+oob_errs <- tune.result[, 2];
+png("out/analysis/problem1/plots/OOB_error_vs_mtry_randforest_problem1.png");
+plt <- ggplot(mapping=aes(x = mtry_vals, y = oob_errs)) +
+  geom_line(color = "skyblue") +
+  geom_point(color = "red", size = 3) +
+  labs(title = "mtry vs OOB Error",
+       x = "mtry",
+       y = "OOB Error");
+print(plt);
+dev.off();
+best.mtry <- tune.result[which.min(tune.result[,2]), 1];
+print(paste0("Best choice of mtry based on OOB error is ", best.mtry));
+best.rf <- randomForest(TOBFLAG ~ ., data=prob1_data.train, mtry=best.mtry,
+                           importance=TRUE);
+png("out/analysis/problem1/plots/error_vs_size_randforest_problem1.png");
+plot(best.rf, main="OOB Error (Total and by Group)");
+
+legend("topright", legend = c("Total", "No Tobacco", "Tobacco"), col = 1:ncol(best.rf$err.rate),
+       lty = 1:ncol(best.rf$err.rate), cex = 0.8);
+dev.off();
+
+pred <- predict(best.rf, newdata=prob1_data.test, type="class");
+conf.mat <- table(pred, prob1_data.test$TOBFLAG);
+testerr <- (conf.mat[1,2] + conf.mat[2,1]) / sum(conf.mat);
+# compute balanced error rate equally weighting error for each class
+overall_err <- balanced_f1(conf.mat, rep(1/nrow(conf.mat), nrow(conf.mat)));
+test_errs <- rbind(test_errs, data.frame(problem=1, model_type="random_forest",
+                                         test_error=testerr, error_type="error_rate",
+                                         balanced_f1=overall_err[1], 
+                                         class1_f1=overall_err[2],
+                                         class2_f1=overall_err[3],
+                                         class3_f1=NaN, log_transformed=FALSE));
+```
+```{r}
+varImpPlot(best.rf);
+relimp <- importance(best.rf)[order(importance(fit.bag)[, 4], decreasing=TRUE),];
+write.csv(relimp, "out/analysis/problem1/data/rel_import_randforest_problem1.csv",
+          row.names=TRUE);
+```
+
+
+## Problem 2: Predicting whether a youth drinks alcohol never, seldom, or often
+
+
+
+### Problem 2: final preprocessing
+
+Since there was the classes in ALCYDAYS are heavily imbalanced, with the class representing no usage having much higher membership than the others, it was decided to transform ALCYDAYS by keeping the never used category and the lowest usage categories but combining all the others. The result is fewer classes "Never", "Seldom", and "Moderate/Often". While the imbalance remains, there is greater membership in the new combined class than the individual high usage classes. This may improve the model's ability to learn rules that result in predicting the new combined class, compared with the individual original classes.
+
+```{r}
+# remove alc and irrelevant columns, all other substance columns
+prob2_data.train <- train.data %>%
+  select(all_of(c(demographic_cols, youth_experience_cols, "ALCYDAYS"))) %>%
+  mutate(ALCYFREQ = as.factor(ifelse(ALCYDAYS == 0, "Never",
+                              ifelse(ALCYDAYS == 1, "Seldom", "Moderate/Often")))) %>%
+                    select(-ALCYDAYS);
+prob2_data.test <- test.data %>%
+  select(all_of(c(demographic_cols, youth_experience_cols, "ALCYDAYS"))) %>%
+  mutate(ALCYFREQ = as.factor(ifelse(ALCYDAYS == 0, "Never",
+                              ifelse(ALCYDAYS == 1, "Seldom", "Moderate/Often")))) %>%
+                    select(-ALCYDAYS);
+write.csv(prob2_data.train, "out/analysis/problem2/data/train_data_problem2.csv",
+          row.names=FALSE);
+write.csv(prob2_data.test, "out/analysis/problem2/data/test_data_problem2.csv",
+          row.names=FALSE);
+```
+
+### Problem 2: Tree and Pruned Tree Models
+
+```{r}
+# simple trees
+library(tree);
+
+
+fit.tree <- tree(ALCYFREQ ~ ., data = prob2_data.train);
+cv.result <- cv.tree(fit.tree, FUN=prune.misclass);
+print(which.min(cv.result$dev));
+pruned.tree <- prune.tree(fit.tree, best=3);
+print(summary(pruned.tree));
+png("out/analysis/problem2/plots/cverror_vs_pruning_prob2.png");
+plot(cv.result$size, cv.result$dev, main="cv error vs tree size");
+dev.off();
+png("out/analysis/problem2/plots/tree_pruned_prob2.png");
+plot(pruned.tree);
+text(pruned.tree, pretty=0);
+dev.off();
+png("out/analysis/problem2/plots/tree_full_prob2.png");
+plot(fit.tree);
+text(fit.tree, pretty=0);
+dev.off();
+print(cv.result);
+
+pred <- predict(fit.tree, newdata=prob2_data.test, type="class");
+conf.mat <- table(pred, prob2_data.test$ALCYFREQ);
+testerr <- 1- (sum(diag(conf.mat)) / sum(conf.mat));
+# compute balanced error rate equally weighting error for each class
+overall_err <- balanced_f1(conf.mat, rep(1/nrow(conf.mat), nrow(conf.mat)));
+test_errs <- rbind(test_errs, data.frame(problem=2, model_type="tree",
+                                         test_error=testerr, error_type="error_rate",
+                                         balanced_f1=overall_err[1], 
+                                         class1_f1=overall_err[2],
+                                         class2_f1=overall_err[3],
+                                         class3_f1=overall_err[4], log_transformed=FALSE));
+pred <- predict(pruned.tree, newdata=prob2_data.test, type="class");
+conf.mat <- table(pred, prob2_data.test$ALCYFREQ);
+testerr <- 1- (sum(diag(conf.mat)) / sum(conf.mat));
+# compute balanced error rate equally weighting error for each class
+overall_err <- balanced_f1(conf.mat, rep(1/nrow(conf.mat), nrow(conf.mat)));
+test_errs <- rbind(test_errs, data.frame(problem=2, model_type="pruned_tree",
+                                         test_error=testerr, error_type="error_rate",
+                                         balanced_f1=overall_err[1], 
+                                         class1_f1=overall_err[2],
+                                         class2_f1=overall_err[3],
+                                         class3_f1=overall_err[4], log_transformed=FALSE));
+```
+
+
+### Problem 2: Random Forest Model
+
+```{r}
+# random forests tuning based on OOB overall error
+tune.result <- tuneRF(x=prob2_data.train %>% select(-ALCYFREQ),
+                      y=prob2_data.train$ALCYFREQ,
+                      mtryStart=floor(sqrt(ncol(prob2_data.train)-1)),
+                      stepFactor=1.2,
+                      improve=0.001,
+                      ntreeTry=100,);
+
+mtry_vals <- tune.result[, 1];
+oob_errs <- tune.result[, 2];
+png("out/analysis/problem2/plots/OOB_error_vs_mtry_randforest_problem2.png");
+plt <- ggplot(mapping=aes(x = mtry_vals, y = oob_errs)) +
+  geom_line(color = "skyblue") +
+  geom_point(color = "red", size = 3) +
+  labs(title = "mtry vs OOB Error",
+       x = "mtry",
+       y = "OOB Error");
+print(plt);
+dev.off();
+best.mtry <- tune.result[which.min(tune.result[,2]), 1];
+print(paste0("Best choice of mtry based on OOB error is ", best.mtry));
+best.rf <- randomForest(ALCYFREQ ~ ., data=prob2_data.train, mtry=best.mtry,
+                           importance=TRUE);
+png("out/analysis/problem2/plots/error_vs_size_randforest_problem2.png");
+plot(best.rf, main="OOB Error (Total and by Group)");
+
+legend("topright", legend = colnames(best.rf$err.rate), col = 1:ncol(best.rf$err.rate),
+       lty = 1:ncol(best.rf$err.rate), cex = 0.8);
+dev.off();
+
+pred <- predict(best.rf, newdata=prob2_data.test, type="class");
+conf.mat <- table(pred, prob2_data.test$ALCYFREQ);
+testerr <- testerr <- 1 - (sum(diag(conf.mat)) / sum(conf.mat));
+# compute balanced error rate equally weighting error for each class
+overall_err <- balanced_f1(conf.mat, rep(1/nrow(conf.mat), nrow(conf.mat)));
+test_errs <- rbind(test_errs, data.frame(problem=2, model_type="random_forest",
+                                         test_error=testerr, error_type="error_rate",
+                                         balanced_f1=overall_err[1], 
+                                         class1_f1=overall_err[2],
+                                         class2_f1=overall_err[3],
+                                         class3_f1=overall_err[4], log_transformed=FALSE));
+```
+
+```{r}
+varImpPlot(best.rf);
+rel_imp <- importance(best.rf)[order(importance(best.rf)[, 4], decreasing=TRUE),];
+print(rel_imp);
+write.csv(rel_imp, "out/analysis/problem2/data/rel_imp_randforest_problem2.csv",
+          row.names = TRUE);
+```
+
+
+## Problem 3: Predicting the number of days a youth used marijuana in the past year
+
+### Problem 3: Final Preprocessing
+
+Since EDA identified a heavy right skew and nonnormality in the response variable, IRMJFY, a model built on a log-transformation of IRMJFY will be compared to that built on the original variable. Since zeros are present in the data, the transformation requires nudging to ensure that zeros may be transformed. Then, where possible, the reverse transformation was applied to predictions on the test and error set so that validation set error may be properly compared between the models.
+
+```{r}
+# remove all other substance columns
+# add log transformation to reduce skew and compare to model on un transformed variable
+ 
+prob3_data.train <- train.data %>%
+  mutate(log_IRMJFY = log(IRMJFY + 0.001)) %>%
+  select(all_of(c(demographic_cols, youth_experience_cols, "IRMJFY", "log_IRMJFY")));
+  
+prob3_data.test <- test.data %>%
+  mutate(log_IRMJFY = log(IRMJFY + 0.001)) %>%
+  select(all_of(c(demographic_cols, youth_experience_cols, "IRMJFY", "log_IRMJFY")));
+write.csv(prob3_data.train, "out/analysis/problem3/data/train_data_problem3.csv",
+          row.names=FALSE);
+write.csv(prob3_data.test, "out/analysis/problem3/data/test_data_problem3.csv",
+          row.names=FALSE);
+
+```
+
+### Problem 3: Tree and Pruned Tree Models
+
+
+Modeling on original past year days of marijuana use (IRMJFY):  
+
+```{r}
+# simple tree
+library(tree);
+
+
+fit.tree <- tree(IRMJFY ~ . - log_IRMJFY, data = prob3_data.train);
+cv.result <- cv.tree(fit.tree, FUN=prune.tree);
+print(which.min(cv.result$dev));
+pruned.tree <- prune.tree(fit.tree, best=6);
+print(summary(pruned.tree));
+png("out/analysis/problem3/plots/cverror_vs_pruning_prob3.png");
+plot(cv.result$size, cv.result$dev, main="cv error vs tree size");
+dev.off();
+png("out/analysis/problem3/plots/tree_pruned_prob3.png");
+plot(pruned.tree);
+text(pruned.tree, pretty=0);
+dev.off();
+png("out/analysis/problem3/plots/tree_full_prob3.png");
+plot(fit.tree);
+text(fit.tree, pretty=0);
+dev.off();
+print(cv.result);
+
+pred <- predict(fit.tree, newdata=prob3_data.test);
+testerr <- mean((pred - prob3_data.test$IRMJFY)^2);
+test_errs <- rbind(test_errs, data.frame(problem=3, model_type="tree",
+                                         test_error=testerr, error_type="mse",
+                                         balanced_f1=NaN, 
+                                         class1_f1=NaN,
+                                         class2_f1=NaN,
+                                         class3_f1=NaN, log_transformed=FALSE));
+pred <- predict(pruned.tree, newdata=prob3_data.test);
+testerr <- mean((pred - prob3_data.test$IRMJFY)^2);
+test_errs <- rbind(test_errs, data.frame(problem=3, model_type="pruned_tree",
+                                         test_error=testerr, error_type="mse",
+                                         balanced_f1=NaN, 
+                                         class1_f1=NaN,
+                                         class2_f1=NaN,
+                                         class3_f1=NaN, log_transformed=FALSE));
+```
+
+Modeling on log-transformed past year days of marijuana use (log_IRMJFY):  
+
+```{r}
+# tree for log_IRMJFY
+fit.tree <- tree(log_IRMJFY ~ . - IRMJFY, data = prob3_data.train);
+cv.result <- cv.tree(fit.tree, FUN=prune.tree);
+print(which.min(cv.result$dev));
+pruned.tree <- prune.tree(fit.tree, best=6);
+print(summary(pruned.tree));
+png("out/analysis/problem3/plots/cverror_vs_pruning_prob3_logtransformed.png");
+plot(cv.result$size, cv.result$dev, main="cv error vs tree size");
+dev.off();
+png("out/analysis/problem3/plots/tree_pruned_prob3_logtransformed.png");
+plot(pruned.tree);
+text(pruned.tree, pretty=0);
+dev.off();
+png("out/analysis/problem3/plots/tree_full_prob3_logtransformed.png");
+plot(fit.tree);
+text(fit.tree, pretty=0);
+dev.off();
+print(cv.result);
+
+#predict and undo log transformation for apples to apples comparison
+pred <- exp(predict(fit.tree, newdata=prob3_data.test)) - 0.001;
+testerr <- mean((pred - prob3_data.test$IRMJFY)^2);
+test_errs <- rbind(test_errs, data.frame(problem=3, model_type="tree",
+                                         test_error=testerr, error_type="mse",
+                                         balanced_f1=NaN, 
+                                         class1_f1=NaN,
+                                         class2_f1=NaN,
+                                         class3_f1=NaN, log_transformed=TRUE));
+pred <- predict(pruned.tree, newdata=prob3_data.test) - 0.001;
+testerr <- mean((pred - prob3_data.test$IRMJFY)^2);
+test_errs <- rbind(test_errs, data.frame(problem=3, model_type="pruned_tree",
+                                         test_error=testerr, error_type="mse",
+                                         balanced_f1=NaN, 
+                                         class1_f1=NaN,
+                                         class2_f1=NaN,
+                                         class3_f1=NaN, log_transformed=TRUE));
+```
+
+### Problem 3: Boosted Tree Ensembles
+
+Modeling on original past year days of marijuana use (IRMJFY):  
+
+```{r}
+# boosted models
+tune.grid <- expand.grid( ntrees = c(25, 50, 100, 150),
+                          depth = 1:3,
+                          shrinkage =c(0.001, 0.01, 0.05, 0.1));
+```
+```{r}
+library(gbm);
+param_tune.results <- data.frame(tune.grid);
+cv.scores <- numeric(nrow(tune.grid));
+train.errs <- numeric(nrow(tune.grid));
+gbmtest.errs <- numeric(nrow(tune.grid));
+for (r in 1:nrow(tune.grid)) {
+  fit.gbm <- gbm(IRMJFY ~ . - log_IRMJFY, data=prob3_data.train, distribution="gaussian",
+                 cv.folds=5, verbose=FALSE,
+                 n.trees = tune.grid[r, "ntrees"],
+                 interaction.depth = tune.grid[r, "depth"],
+                 shrinkage = tune.grid[r, "shrinkage"]);
+  cv.scores[r] <- fit.gbm$cv.error[length(fit.gbm$cv.error)];
+  train.errs[r] <- fit.gbm$train.error[length(fit.gbm$train.error)];
+  pred <- predict(fit.gbm, newdata=prob3_data.test, n.trees=tune.grid[r, "ntrees"]);
+  gbmtest.errs[r] <- mean((pred - prob3_data.test$IRMJFY)^2);
+}
+param_tune.results$cv_error <- cv.scores; # for choosing
+param_tune.results$train_error <- train.errs; # for plotting
+param_tune.results$test_error <- gbmtest.errs; # for plotting
+```
+```{r}
+# Choose best parameter combination based on CV score
+best.params <- param_tune.results[which.min(cv.scores),];
+best.gbm <- gbm(IRMJFY ~ . - log_IRMJFY, data=prob3_data.train, distribution="gaussian",
+                verbose=FALSE,
+                n.trees = best.params[["ntrees"]],
+                interaction.depth = best.params[["depth"]],
+                shrinkage = best.params[["shrinkage"]]);
+
+pred <- predict(best.gbm, newdata=prob3_data.test, n.trees=best.params[["ntrees"]]);
+testerr <- mean((pred - prob3_data.test$IRMJFY)^2);
+test_errs <- rbind(test_errs, data.frame(problem=3, model_type="boosting",
+                                         test_error=testerr, error_type="mse",
+                                         balanced_f1=NaN, 
+                                         class1_f1=NaN,
+                                         class2_f1=NaN,
+                                         class3_f1=NaN, log_transformed=FALSE));
+
+print(best.params);
+write.csv(summary(best.gbm), "out/analysis/problem3/data/rel_import_boosting_problem3.csv",
+          row.names = TRUE);
+```
+
+
+Modeling on log-transformed past year days of marijuana use (log_IRMJFY):  
+
+```{r}
+param_tune.logtransformed <- data.frame(tune.grid);
+cv.scores <- numeric(nrow(tune.grid));
+train.errs <- numeric(nrow(tune.grid));
+gbmtest.errs <- numeric(nrow(tune.grid));
+for (r in 1:nrow(tune.grid)) {
+  fit.gbm <- gbm(log_IRMJFY ~ . - IRMJFY, data=prob3_data.train, distribution="gaussian",
+                 cv.folds=5, verbose=FALSE,
+                 n.trees = tune.grid[r, "ntrees"],
+                 interaction.depth = tune.grid[r, "depth"],
+                 shrinkage = tune.grid[r, "shrinkage"]);
+  
+  # used for tuning, log tansform not undone
+  cv.scores[r] <- fit.gbm$cv.error[length(fit.gbm$cv.error)];
+  train.pred <- exp(predict(fit.gbm, n.trees=tune.grid[r, "ntrees"])) - 0.001;
+  #train.errs[r] <- fit.gbm$train.error[length(fit.gbm$train.error)];
+  train.errs[r] <- mean((train.pred - prob3_data.train$IRMJFY)^2);
+  pred <- exp(predict(fit.gbm, newdata=prob3_data.test, n.trees=tune.grid[r, "ntrees"])) - 0.001;
+  gbmtest.errs[r] <- mean((pred - prob3_data.test$IRMJFY)^2);
+}
+param_tune.logtransformed$cv_error <- cv.scores; # for choosing
+param_tune.logtransformed$train_error <- train.errs; # for plotting
+param_tune.logtransformed$test_error <- gbmtest.errs; # for plotting
+
+# Choose best parameter combination based on CV score
+best.params <- param_tune.logtransformed[which.min(cv.scores),];
+best.gbm.log <- gbm(log_IRMJFY ~ . - IRMJFY, data=prob3_data.train, distribution="gaussian",
+                verbose=FALSE,
+                n.trees = best.params[["ntrees"]],
+                interaction.depth = best.params[["depth"]],
+                shrinkage = best.params[["shrinkage"]]);
+
+pred <- predict(best.gbm.log, newdata=prob3_data.test, n.trees=best.params[["ntrees"]]);
+testerr <- mean((pred - prob3_data.test$IRMJFY)^2);
+test_errs <- rbind(test_errs, data.frame(problem=3, model_type="boosting",
+                                         test_error=testerr, error_type="mse",
+                                         balanced_f1=NaN, 
+                                         class1_f1=NaN,
+                                         class2_f1=NaN,
+                                         class3_f1=NaN, log_transformed=TRUE));
+
+print(best.params);
+write.csv(summary(best.gbm), "out/analysis/problem3/data/rel_import_boosting_problem3_logtransformed.csv",
+          row.names = TRUE);
+```
+
+
+
+```{r}
+# tuning plots
+plot_tuning <- function(tuning_data, curr_tuner, err_metrics, other_tuners, output_dir,
+                        suffix) {
+  # Unique combinations of the other parameters
+  unique_combinations <- unique(tuning_data[other_tuners])  
+
+  for (i in 1:nrow(unique_combinations)) {
+    # Filter data for the current combination of other tuners
+    filter_conditions <- Map(function(col, val) tuning_data[[col]] == val,
+                             names(unique_combinations), unique_combinations[i, ])
+    filtered_data <- tuning_data[Reduce(`&`, filter_conditions), ]
+    
+    plot <- ggplot(filtered_data, aes_string(x = curr_tuner)) +
+      geom_line(aes_string(y = err_metrics[1], color = shQuote(err_metrics[1]))) +
+      geom_line(aes_string(y = err_metrics[2], color = shQuote(err_metrics[2]))) +
+      geom_line(aes_string(y = err_metrics[3], color = shQuote(err_metrics[3]))) +
+      labs(
+        title = paste("Error Metrics vs", curr_tuner, "for",
+                      paste(names(unique_combinations), unique_combinations[i, ],
+                            sep = "=", collapse = ", ")),
+        x = curr_tuner,
+        y = "Error Metrics") +
+      scale_color_manual(values = c("cv_error" = "coral", "train_error" = "skyblue",
+                                    "test_error" = "green"));
+
+
+    filename <- paste0(output_dir, curr_tuner, "_error_plot_", paste(names(unique_combinations), unique_combinations[i, ], sep = "", collapse = "_"), suffix, ".png");
+    ggsave(filename, plot = plot);
+  }
+}
+```
+
+```{r}
+
+# Generate plots for each parameter
+output_dir <- "out/analysis/problem3/";
+y_vars <- c("cv_error", "train_error", "test_error");
+plot_tuning(param_tune.results, "ntrees", y_vars, c("depth", "shrinkage"), output_dir, "");
+plot_tuning(param_tune.results, "depth", y_vars, c("ntrees", "shrinkage"), output_dir, "");
+plot_tuning(param_tune.results, "shrinkage", y_vars, c("ntrees", "depth"), output_dir, "");
+plot_tuning(param_tune.logtransformed, "ntrees", y_vars, c("depth", "shrinkage"), output_dir,
+            "_logtransformed");
+plot_tuning(param_tune.logtransformed, "depth", y_vars, c("ntrees", "shrinkage"), output_dir,
+            "_logtransformed");
+plot_tuning(param_tune.logtransformed, "shrinkage", y_vars, c("ntrees", "depth"), output_dir,
+            "_logtransformed");
+```
+
+
+```{r}
+# write dataframes containing tuning results
+write.csv(param_tune.results, "out/analysis/problem3/params_and_errs_boosting_problem3.csv",
+          row.names = FALSE);
+write.csv(param_tune.logtransformed,
+          "out/analysis/problem3/params_and_errs_boosting_problem3_logtransformed.csv",
+          row.names = FALSE);
+tuners <- c("ntrees", "depth", "shrinkage");
+
+#overall plot of tuners vs errs
+for (param in tuners) {
+  plot_data <- param_tune.results %>%
+    mutate(thisparam=param_tune.results[[param]]) %>% select(-all_of(tuners)) %>%
+    pivot_longer(cols=c("cv_error", "train_error", "test_error"),
+                 names_to = "Error_Type",
+                 values_to = "Error") %>%
+    mutate(Error_Type = as.factor(Error_Type));
+  print(sum(plot_data$Error));
+  plt <- ggplot(data=plot_data, mapping=aes(x=thisparam, y=Error,
+                                            color=Error_Type,
+                                            shape=Error_Type)) +
+    geom_point() +
+    labs(title = paste0("Error vs ", param),
+         x=param, y="Error",
+         color="Error Type",
+         shape="Error Type") +
+    scale_color_manual(values = c("darkgrey", "skyblue", "coral"));
+  print(plt);
+  ggsave(filename=paste0("out/analysis/problem3/plots/", param,
+                         "_vs_error_boosting_problem3.png"), plot=plt);
+}
+
+#overall plot of tuners vs errs for logtransformed data
+for (param in tuners) {
+  plot_data <- param_tune.logtransformed %>%
+    mutate(thisparam=param_tune.results[[param]]) %>% select(-all_of(tuners)) %>%
+    pivot_longer(cols=c("cv_error", "train_error", "test_error"),
+                 names_to = "Error_Type",
+                 values_to = "Error") %>%
+    mutate(Error_Type = as.factor(Error_Type));
+  print(sum(plot_data$Error));
+  plt <- ggplot(data=plot_data, mapping=aes(x=thisparam, y=Error,
+                                            color=Error_Type,
+                                            shape=Error_Type)) +
+    geom_point() +
+    labs(title = paste0("Error vs ", param),
+         x=param, y="Error",
+         color="Error Type",
+         shape="Error Type") +
+    scale_color_manual(values = c("darkgrey", "skyblue", "coral"));
+  print(plt);
+  ggsave(filename=paste0("out/analysis/problem3/plots/", param,
+                         "_vs_error_boosting_problem3_logtransformed.png"), plot=plt);
+}
+```
+
+```{r}
+#log transformed version has higher lower cv error (in part caused by transformation)
+# but higher test error for both minimum cv model and minimum test error models
+print("Best parameter based on test error for nontransformed IRMJFY model:");
+print(param_tune.results[which.min(param_tune.results[["test_error"]]),]);
+print("Best parameter based on test error for log-transformed IRMJFY model:");
+print(param_tune.logtransformed[which.min(param_tune.logtransformed[["test_error"]]),]);
+```
+With the log transformed version of the target, The minimum cv_error based on the log transformed data does not result in the lowest de-transformed test_error. The validation set error for the transformed data fluctuates and in general is higher than similar models that just use the raw target variable, days of marijuana use in the past year. While there is some concern about the effectiveness of a treebased model to make decisions about a heavily skewed, nonnormal target variable, the log transformation is not effective in significantly normalizing the data, or in improving the model. 
+
+
+```{r}
+# save file with evaluations metrics for all models and problems
+write.csv(test_errs, "out/analysis/Validation_set_error_all_problems_models.csv",
+          row.names = FALSE);
+```
